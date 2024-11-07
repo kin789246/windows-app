@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Weak;
 use std::collections::HashMap;
 use std::mem::zeroed;
 use windows::core::*;
@@ -12,43 +14,50 @@ use crate::{
     app::App,
     win_str::*,
     dialog::*,
+    thread_safe::*,
 };
 
 #[derive(Default)]
 pub(crate) struct StrResource {
     pub(crate) path: HSTRING,
-    pub(crate) remove: HSTRING,
+    pub(crate) run: HSTRING,
 }
 
 impl StrResource {
     pub(crate) fn new() -> Self {
         Self {
             path: HSTRING::from("路徑"),
-            remove: HSTRING::from("刪除"),
+            run: HSTRING::from("GO"),
         }
     }
 }
 
 #[derive(Default)]
 pub struct Window {
+    app: Weak<RefCell<App>>,  
     app_wnd: HWND,
     controls: HashMap<usize, Rect>,
-    app: Box<App>,
     local: StrResource,
     width: u32,
     height: u32,
 }
 
 impl Window {
+    pub const WM_UPDATE_TEXT: u32 = WM_USER + 1;
     const ID_BTN_PATH: usize = 1;
-    const ID_BTN_REMOVE: usize = 2;
+    const ID_BTN_RUN: usize = 2;
     const ID_TEXTBOX_RESULT: usize = 3;
     const ID_TEXTBOX_PATH: usize = 4;
     const BTN_WIDTH: f32 = 80.0;
     const ONELINE_HEIGHT: f32 = 30.0;
     const PADDING: f32 = 5.0;
 
-    pub fn new(title: &str, width: u32, height: u32, app: Box<App>) -> Result<Box<Self>> {
+    pub fn new(
+        title: &str, 
+        width: u32, 
+        height: u32, 
+        app: Weak<RefCell<App>>
+    ) -> Result<Self> {
         unsafe {
             let instance = GetModuleHandleW(None)?;
 
@@ -81,13 +90,12 @@ impl Window {
                 Self {
                     app_wnd: HWND(std::ptr::null_mut()),
                     controls: HashMap::new(),
-                    app:Box::new(app),
+                    app,
                     local: StrResource::new(),
                     width,
                     height,
                     ..Default::default()
-                }
-            );
+                });
 
             // create main window
             result.app_wnd = CreateWindowExW(
@@ -117,7 +125,16 @@ impl Window {
                 }
             }
 
-            Ok(result)
+            Ok(*result)
+        }
+    }
+
+    pub fn get_result_tb(&self) -> Option<HWND> {
+        unsafe {
+            match GetDlgItem(self.app_wnd, Self::ID_TEXTBOX_RESULT as i32) {
+                Ok(t) => Some(t),
+                Err(_) => None
+            }
         }
     }
 
@@ -173,12 +190,27 @@ impl Window {
                         Self::ID_BTN_PATH => {
                             self.on_path_btn();
                         },
-                        Self::ID_BTN_REMOVE => {
+                        Self::ID_BTN_RUN => {
+                            if let Some(app) = self.app.upgrade() {
+                                app.borrow().display_words();
+                            }
                         },
                         _ => {
                             self.on_textbox(wparam); 
                         },
                     }
+                    LRESULT(0)
+                },
+                Self::WM_UPDATE_TEXT => {
+                    // Handle the message from worker thread
+                    if let Some(textbox) = self.get_result_tb() {
+                        if let Some(app) = self.app.upgrade() {
+                            self.append_to_textbox(
+                                textbox, &app.borrow().get_data().to_string()
+                            );
+                        }
+                    }
+                    
                     LRESULT(0)
                 },
                 _ => DefWindowProcW(self.app_wnd, message, wparam, lparam),
@@ -322,18 +354,18 @@ impl Window {
                 Width: Self::BTN_WIDTH, 
                 Height: Self::ONELINE_HEIGHT
             };
-            self.controls.insert(Self::ID_BTN_REMOVE, remove_btn_rect);
+            self.controls.insert(Self::ID_BTN_RUN, remove_btn_rect);
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("BUTTON"),
-                hstr_to_pcwstr(&self.local.remove),
+                hstr_to_pcwstr(&self.local.run),
                 WS_VISIBLE | WS_CHILD,
                 remove_btn_rect.X as i32,
                 remove_btn_rect.Y as i32,
                 remove_btn_rect.Width as i32,
                 remove_btn_rect.Height as i32,
                 self.app_wnd,
-                HMENU(Self::ID_BTN_REMOVE as _),
+                HMENU(Self::ID_BTN_RUN as _),
                 instance,
                 None,
             )?;
@@ -358,7 +390,7 @@ impl Window {
         let rect = self.controls.get_mut(&Self::ID_BTN_PATH).unwrap();
         rect.X = path_tb_rect.X + path_tb_rect.Width + Self::PADDING;
         // update remove button
-        let rect = self.controls.get_mut(&Self::ID_BTN_REMOVE).unwrap();
+        let rect = self.controls.get_mut(&Self::ID_BTN_RUN).unwrap();
         rect.X = path_tb_rect.X + path_tb_rect.Width + Self::BTN_WIDTH + Self::PADDING * 2.0;
     }
 
@@ -404,12 +436,41 @@ impl Window {
         }
     }
 
-    fn init(&mut self) {
+    fn append_to_textbox(&self, textbox: HWND, content: &str) {
         unsafe {
-            if let Ok(textbox) = 
-                GetDlgItem(self.app_wnd, Self::ID_TEXTBOX_RESULT as i32) 
-            {
-            }
+            // Get the length of text in the edit control
+            let text_length = 
+                SendMessageW(textbox, WM_GETTEXTLENGTH, WPARAM(0), LPARAM(0));
+            // Set the selection to the end of the text
+            // This effectively moves the caret to the end
+            SendMessageW(
+                textbox,
+                EM_SETSEL,
+                WPARAM(text_length.0 as usize),
+                LPARAM(text_length.0)
+            );
+            // Append content
+            let result_log = HSTRING::from(&format!("{}\r\n", content));
+            SendMessageW(
+                textbox, 
+                EM_REPLACESEL, 
+                WPARAM(1), 
+                LPARAM(result_log.as_ptr() as isize)
+            );
+            
+            // Get current line count
+            let line_count = 
+                SendMessageW(textbox, EM_GETLINECOUNT, WPARAM(0), LPARAM(0));
+            // Scroll to bottom
+            SendMessageW(textbox, EM_LINESCROLL, WPARAM(0), LPARAM(line_count.0));
+        }
+    }
+
+    fn init(&mut self) {
+        // Setup worker thread before storing window
+        if let Some(app) = self.app.upgrade() {
+            let tx = app.borrow().setup_worker_thread(ThreadSafeHwnd(self.app_wnd));
+            app.borrow_mut().set_tx(Some(tx)); 
         }
     }
 
