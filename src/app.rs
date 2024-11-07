@@ -42,11 +42,7 @@ impl App {
         *self.data.lock().unwrap()
     }
 
-    pub fn set_tx(&mut self, tx: Option<Sender<()>>) {
-        self.tx = tx;
-    }
-
-    pub fn setup_worker_thread(&self, hwnd: ThreadSafeHwnd) -> Sender<()> {
+    pub fn setup_worker_thread(&mut self, hwnd: ThreadSafeHwnd) {
         let (tx, rx) = channel();
         let data = self.data.clone();
         thread::spawn(move || {
@@ -68,7 +64,7 @@ impl App {
             }
         });
 
-        tx
+        self.tx = Some(tx);
     }
 
     pub fn run(app: Rc<RefCell<Self>>) -> Result<(), Error> {

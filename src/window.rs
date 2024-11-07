@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::mem::zeroed;
 use windows::core::*;
 use windows::Foundation::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::{
     Foundation::*,
     UI::{WindowsAndMessaging::*, Controls::*},
@@ -193,6 +194,10 @@ impl Window {
                         Self::ID_BTN_RUN => {
                             if let Some(app) = self.app.upgrade() {
                                 app.borrow().display_words();
+                                self.enable_window(
+                                    Self::ID_BTN_RUN as u32,
+                                    false
+                                );
                             }
                         },
                         _ => {
@@ -207,6 +212,10 @@ impl Window {
                         if let Some(app) = self.app.upgrade() {
                             self.append_to_textbox(
                                 textbox, &app.borrow().get_data().to_string()
+                            );
+                            self.enable_window(
+                                Self::ID_BTN_RUN as u32,
+                                true
                             );
                         }
                     }
@@ -466,11 +475,18 @@ impl Window {
         }
     }
 
+    fn enable_window(&self, id: u32, enable: bool) {
+        unsafe {
+            if let Ok(ctrl) = GetDlgItem(self.app_wnd, id as i32) {
+                let _ = EnableWindow(ctrl, BOOL(enable as i32));
+            }
+        }
+    }
+
     fn init(&mut self) {
         // Setup worker thread before storing window
         if let Some(app) = self.app.upgrade() {
-            let tx = app.borrow().setup_worker_thread(ThreadSafeHwnd(self.app_wnd));
-            app.borrow_mut().set_tx(Some(tx)); 
+            app.borrow_mut().setup_worker_thread(ThreadSafeHwnd(self.app_wnd));
         }
     }
 
