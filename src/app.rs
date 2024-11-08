@@ -15,11 +15,13 @@ use windows::Win32::{
 use crate::window::Window;
 use crate::thread_safe::ThreadSafeHwnd;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct App {
     // Channel sender for thread communication
     tx: Option<Sender<()>>,  
     data: Arc<Mutex<u32>>,
+    // (curr, max, msg)
+    progress: Arc<Mutex<(u8, u8, String)>>,
 }
 
 impl App {
@@ -27,7 +29,8 @@ impl App {
         Rc::new(
             RefCell::new(App {
                 tx: None,
-                data: Arc::new(Mutex::new(0))
+                data: Arc::new(Mutex::new(0)),
+                ..Default::default()
             }))
     }
 
@@ -36,6 +39,32 @@ impl App {
         if let Some(tx) = &self.tx {
             let _ = tx.send(());
         }
+    }
+
+    pub fn run_progress_bar(&self, hwnd: ThreadSafeHwnd) {
+        let pb_data = self.progress.clone();
+        thread::spawn(move || {
+            for i in 0..30 {
+                thread::sleep(std::time::Duration::from_millis(400));
+                let mut pb_data = pb_data.lock().unwrap();
+                let msg = format!("進度{}/30", (i+1).to_string());
+                *pb_data = (i+1, 30, msg);
+                // Post message back to main window
+                let hwnd = hwnd.clone().0;
+                unsafe {
+                    let _ = PostMessageW(
+                        hwnd,
+                        Window::WM_UPDATE_TEXT,
+                        WPARAM(0),
+                        LPARAM(0)
+                    );
+                }
+            }
+        });
+    }
+
+    pub fn get_progress(&self) -> (u8, u8, String) {
+        (*self.progress.lock().unwrap()).clone()
     }
 
     pub fn get_data(&self) -> u32 {

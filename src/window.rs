@@ -49,6 +49,7 @@ impl Window {
     const ID_BTN_RUN: usize = 2;
     const ID_TEXTBOX_RESULT: usize = 3;
     const ID_TEXTBOX_PATH: usize = 4;
+    const ID_PROGRESS_BAR: usize = 5;
     const BTN_WIDTH: f32 = 80.0;
     const ONELINE_HEIGHT: f32 = 30.0;
     const PADDING: f32 = 5.0;
@@ -184,6 +185,7 @@ impl Window {
                 },
                 WM_SIZE => {
                     self.update_rect(lparam);
+                    self.update_position();
                     LRESULT(0)
                 },
                 WM_COMMAND => {
@@ -192,13 +194,7 @@ impl Window {
                             self.on_path_btn();
                         },
                         Self::ID_BTN_RUN => {
-                            if let Some(app) = self.app.upgrade() {
-                                app.borrow().display_words();
-                                self.enable_window(
-                                    Self::ID_BTN_RUN as u32,
-                                    false
-                                );
-                            }
+                            self.on_go_btn();
                         },
                         _ => {
                             self.on_textbox(wparam); 
@@ -207,22 +203,70 @@ impl Window {
                     LRESULT(0)
                 },
                 Self::WM_UPDATE_TEXT => {
-                    // Handle the message from worker thread
-                    if let Some(textbox) = self.get_result_tb() {
-                        if let Some(app) = self.app.upgrade() {
-                            self.append_to_textbox(
-                                textbox, &app.borrow().get_data().to_string()
-                            );
-                            self.enable_window(
-                                Self::ID_BTN_RUN as u32,
-                                true
-                            );
-                        }
-                    }
-                    
+                    self.on_update_textbox(); 
                     LRESULT(0)
                 },
+                /* WM_TIMER => {
+                    if wparam.0 == TIMER_ID {
+                        let hwnd_progress = HWND(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+                        
+                        // Get current position
+                        let current_pos = SendMessageA(hwnd_progress, PBM_GETPOS, 0, 0);
+                        
+                        // Calculate new position (reset to 0 when reaching 100)
+                        let new_pos = if current_pos >= 100 { 0 } else { current_pos + 1 };
+                        
+                        // Update progress bar
+                        SendMessageA(hwnd_progress, PBM_SETPOS, new_pos as usize, 0);
+                    }
+                    LRESULT(0)
+                }, */
                 _ => DefWindowProcW(self.app_wnd, message, wparam, lparam),
+            }
+        }
+    }
+
+    fn on_go_btn(&self) {
+        if let Some(app) = self.app.upgrade() {
+            app.borrow().run_progress_bar(ThreadSafeHwnd(self.app_wnd));
+            self.enable_window(Self::ID_BTN_RUN as u32, false);
+        }
+    }
+
+    fn on_update_textbox(&self) {
+        // Handle the message from worker thread
+        if let Some(app) = self.app.upgrade() {
+            let progress = app.borrow().get_progress();
+            if let Some(textbox) = self.get_result_tb() {
+                self.append_to_textbox(textbox, &progress.2);
+                if progress.0 == progress.1 {
+                    self.enable_window(Self::ID_BTN_RUN as u32, true);
+                }
+            }
+            // handle progress bar
+            unsafe {
+                let hwnd_progress = FindWindowExW(
+                        self.app_wnd,
+                        None,
+                        w!("msctls_progress32"),
+                        w!("")
+                    ).unwrap();
+                
+                // Get current position
+                // let current_pos = SendMessageW(
+                //     hwnd_progress, PBM_GETPOS, WPARAM(0), LPARAM(0)
+                // );
+                
+                // Calculate new position (reset to 0 when reaching 100)
+                let pos = progress.0 as f32 / progress.1 as f32 * 100.0;
+                let new_pos = match pos <= 100.0 {
+                    true => pos as usize,
+                    false => 100
+                };
+                // Update progress bar
+                SendMessageW(
+                    hwnd_progress, PBM_SETPOS, WPARAM(new_pos), LPARAM(0)
+                );
             }
         }
     }
@@ -265,7 +309,7 @@ impl Window {
             EndPaint(self.app_wnd, &ps).unwrap();
         }
         // redraw controls
-        self.update_position();
+        // self.update_position();
     }
 
     fn build_ui(&mut self) -> Result<()> {
@@ -299,10 +343,37 @@ impl Window {
                 None,
             )?;
 
+            // Create progress bar
+            let progress_bar_rect = Rect {
+                X: Self::PADDING, 
+                Y: path_tb_rect.Y + Self::ONELINE_HEIGHT + Self::PADDING, 
+                Width: self.width as f32 - Self::PADDING * 2.0, 
+                Height: Self::ONELINE_HEIGHT 
+            };
+            self.controls.insert(Self::ID_PROGRESS_BAR, progress_bar_rect);
+            let hwnd_progress = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("msctls_progress32"),
+                w!(""),
+                WINDOW_STYLE( WS_CHILD.0 | WS_VISIBLE.0),
+                progress_bar_rect.X as i32,
+                progress_bar_rect.Y as i32,
+                progress_bar_rect.Width as i32,
+                progress_bar_rect.Height as i32,
+                self.app_wnd,
+                HMENU(Self::ID_PROGRESS_BAR as _),
+                instance,
+                None,
+            )?;
+
+            // Initialize progress bar
+            SendMessageW(hwnd_progress, PBM_SETRANGE32, WPARAM(0), LPARAM(100));
+            // SendMessageW(hwnd_progress, PBM_SETSTEP, WPARAM(10), LPARAM(0));
+
             // Create result textbox
             let result_tb_rect = Rect {
                 X: Self::PADDING, 
-                Y: path_tb_rect.Y + Self::ONELINE_HEIGHT + Self::PADDING, 
+                Y: path_tb_rect.Y + Self::ONELINE_HEIGHT * 2.0 + Self::PADDING * 2.0, 
                 Width: self.width as f32 - Self::PADDING * 2.0, 
                 Height: self.height as f32 - 
                     Self::ONELINE_HEIGHT - 
@@ -379,6 +450,7 @@ impl Window {
                 None,
             )?;
         }
+
         Ok(())
     }
 
@@ -390,11 +462,14 @@ impl Window {
         // update path textbox
         let path_tb_rect = self.controls.get_mut(&Self::ID_TEXTBOX_PATH).unwrap();
         path_tb_rect.Width = width as f32 - Self::BTN_WIDTH * 2.0 - Self::PADDING * 4.0;
+        // update progress bar
+        let progress_bar_rect = self.controls.get_mut(&Self::ID_PROGRESS_BAR).unwrap();
+        progress_bar_rect.Width = width as f32 - Self::PADDING * 2.0; 
         // update result textbox
         let path_tb_rect = self.controls.get(&Self::ID_TEXTBOX_PATH).cloned().unwrap();
         let rect = self.controls.get_mut(&Self::ID_TEXTBOX_RESULT).unwrap();
-        rect.Width = width as f32 - 10.0; 
-        rect.Height = height as f32 - 15.0 - path_tb_rect.Height;
+        rect.Width = width as f32 - Self::PADDING * 2.0; 
+        rect.Height = height as f32 - Self::PADDING * 3.0 - path_tb_rect.Height;
         // update path button
         let rect = self.controls.get_mut(&Self::ID_BTN_PATH).unwrap();
         rect.X = path_tb_rect.X + path_tb_rect.Width + Self::PADDING;
